@@ -4,10 +4,23 @@ struct CameraUniform {
     cameraRotation: vec4f,
 };
 
-struct Orbitstate{
+struct OrbitState{
     u: f32,
     duPhi: f32,
-}
+};
+
+struct RayOrbit {
+    state: OrbitState,
+    radialBasis: vec3f,
+    tangentBasis: vec3f,
+    impactParameter: f32,
+};
+
+struct TraceResult {
+    hit: bool,
+    hitDisk: bool,
+    hitPosition: vec3f, 
+};
 
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
@@ -17,10 +30,72 @@ struct VertexOutput {
     @location(0) uv: vec2f,
 };
 
-fn orbitDerivative(state: Orbitstate, schwarzschildRadius: f32) -> Orbitstate {
+fn orbitDerivative(state: OrbitState, schwarzschildRadius: f32) -> OrbitState {
     let du = state.duPhi;
     let d2u = -state.u + 1.5 * schwarzschildRadius * state.u * state.u;
-    return Orbitstate(du, d2u);
+    return OrbitState(du, d2u);
+}
+
+fn initializeOrbit(rayOrigin: vec3f, rayDirection: vec3f, blackHoleCenter: vec3f, schwarzschildRadius: f32) -> RayOrbit {
+    let relativePosition = rayOrigin - blackHoleCenter;
+    let initialRadius = length(relativePosition);
+    let radialBasis = normalize(relativePosition);
+    let radialComponent = dot(rayDirection, radialBasis);
+    let tangentDirection = rayDirection - radialComponent * radialBasis;
+    let sinAlpha = length(tangentDirection);
+    let orbitNormal = normalize(cross(radialBasis, rayDirection));
+    let tangentBasis = normalize(cross(orbitNormal, radialBasis));
+    let metricFactor = 1.0 - schwarzschildRadius / initialRadius;
+    let sqrtMetric = sqrt(metricFactor);
+    let impactParameter = initialRadius * sinAlpha / sqrtMetric;
+    let initialU = 1.0 / initialRadius;
+    let initialDuPhi = -sqrtMetric * radialComponent / (initialRadius * sinAlpha);
+    let state = OrbitState(initialU, initialDuPhi);
+    return RayOrbit(state, radialBasis, tangentBasis, impactParameter);
+}
+
+fn addOrbitStates(state1: OrbitState, state2: OrbitState) -> OrbitState {
+    return OrbitState(state1.u + state2.u, state1.duPhi + state2.duPhi);
+}
+
+fn scaleOrbitState(state: OrbitState, scale: f32) -> OrbitState {
+    return OrbitState(state.u * scale, state.duPhi * scale);
+}
+
+fn orbitRK4Step(
+    state: OrbitState,
+    stepSize: f32,
+    schwarzschildRadius: f32
+) -> OrbitState {
+    let k1 = orbitDerivative(state, schwarzschildRadius);
+
+    let k2State = addOrbitStates(
+        state,
+        scaleOrbitState(k1, stepSize * 0.5)
+    );
+    let k2 = orbitDerivative(k2State, schwarzschildRadius);
+
+    let k3State = addOrbitStates(
+        state,
+        scaleOrbitState(k2, stepSize * 0.5)
+    );
+    let k3 = orbitDerivative(k3State, schwarzschildRadius);
+
+    let k4State = addOrbitStates(
+        state,
+        scaleOrbitState(k3, stepSize)
+    );
+    let k4 = orbitDerivative(k4State, schwarzschildRadius);
+
+    let weightedSum = addOrbitStates(
+        addOrbitStates(k1, scaleOrbitState(k2, 2.0)),
+        addOrbitStates(scaleOrbitState(k3, 2.0), k4)
+    );
+
+    return addOrbitStates(
+        state,
+        scaleOrbitState(weightedSum, stepSize / 6.0)
+    );
 }
 
 fn getCameraRay(screen: vec2f) -> vec3f {
@@ -38,6 +113,98 @@ fn getCameraRay(screen: vec2f) -> vec3f {
     return normalize(forward + right * screen.x * tanHalfFov + up * screen.y * tanHalfFov);
 }
 
+fn traceBlackHole(
+    rayOrigin: vec3f,
+    rayDirection: vec3f,
+    blackHoleCenter: vec3f,
+    schwarzschildRadius: f32,
+    diskInnerRadius: f32,
+    diskOuterRadius: f32
+) -> TraceResult {
+    let relativePosition = rayOrigin - blackHoleCenter;
+    let radialBasis = normalize(relativePosition);
+    let radialComponent = dot(rayDirection, radialBasis);
+    let tangentDirection = rayDirection - radialComponent * radialBasis;
+
+    if (length(tangentDirection) < 0.0001) {
+        if (radialComponent < 0.0) {
+            return TraceResult(true, false, blackHoleCenter);
+        }
+        return TraceResult(false, false, rayOrigin);
+    }
+
+    let orbit = initializeOrbit(
+        rayOrigin,
+        rayDirection,
+        blackHoleCenter,
+        schwarzschildRadius
+    );
+
+    var state = orbit.state;
+    var phi = 0.0;
+
+    let stepSize = 0.01;
+    let maxSteps = 1000;
+
+    var radius = 1.0 / state.u;
+    var radialDirection = orbit.radialBasis * cos(phi) + orbit.tangentBasis * sin(phi);
+    var prevPosition = blackHoleCenter + radialDirection * radius;
+
+    for (var i = 0; i < maxSteps; i++) {
+        if (state.u <= 0.0) {
+            return TraceResult(false, false, vec3f(0.0));
+        }
+
+        radius = 1.0 / state.u;
+
+        if (radius <= schwarzschildRadius) {
+            return TraceResult(true, false, blackHoleCenter);
+        }
+
+        radialDirection =
+            orbit.radialBasis * cos(phi) +
+            orbit.tangentBasis * sin(phi);
+
+        let currentPosition =
+            blackHoleCenter + radialDirection * radius;
+
+        // Check for accretion disk intersection along the curved ray path (y = blackHoleCenter.y)
+        let diskY = blackHoleCenter.y;
+        if (i > 0 && (prevPosition.y - diskY) * (currentPosition.y - diskY) <= 0.0) {
+            let denom = currentPosition.y - prevPosition.y;
+            var t = 0.5;
+            if (abs(denom) > 0.00001) {
+                t = (diskY - prevPosition.y) / denom;
+            }
+            let hitPos = mix(prevPosition, currentPosition, t);
+            let radialDistance = length(hitPos.xz - blackHoleCenter.xz);
+            if (radialDistance >= diskInnerRadius && radialDistance <= diskOuterRadius) {
+                return TraceResult(false, true, hitPos);
+            }
+        }
+
+        prevPosition = currentPosition;
+
+        state = orbitRK4Step(
+            state,
+            stepSize,
+            schwarzschildRadius
+        );
+
+        phi += stepSize;
+
+        if (state.u > 0.0) {
+            let nextRadius = 1.0 / state.u;
+
+            if (nextRadius > 100.0 && state.duPhi < 0.0) {
+                return TraceResult(false, false, currentPosition);
+            }
+        }
+    }
+
+    return TraceResult(false, false, blackHoleCenter);
+}
+
 @vertex
 fn vertexMain(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
     var positions = array<vec2f, 3>(
@@ -47,54 +214,12 @@ fn vertexMain(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
     );
 
     var output: VertexOutput;
-
     output.position = vec4f(positions[vertexIndex], 0.0, 1.0);
-
     output.uv = vec2f(
         positions[vertexIndex].x * 0.5 + 0.5,
         0.5 - positions[vertexIndex].y * 0.5
     );
-
     return output;
-}
-
-
-
-fn intersectSphere(rayOrigin: vec3f, rayDirection: vec3f, sphereCenter: vec3f, sphereRadius: f32) -> f32 {
-    let oc = rayOrigin - sphereCenter;
-    let a = dot(rayDirection, rayDirection);
-    let b = dot(oc, rayDirection);
-    let c = dot(oc, oc) - sphereRadius * sphereRadius;
-    let discriminant = b * b - a * c;
-
-    if (discriminant < 0.0) {
-        return -1.0; // No intersection
-    }
-    let sqrtDiscriminant = sqrt(discriminant);
-    let t1 = (-b - sqrtDiscriminant) / a; 
-    let t2 = (-b + sqrtDiscriminant) / a;
-    if (t1 > 0.0) {
-        return t1; // Return the nearest intersection point
-    } else if (t2 > 0.0) {
-        return t2; // Return the far intersection point if the nearest is behind the ray origin
-    }
-    return -1.0; // No intersection
-}
-
-fn intersectDisk(rayOrigin: vec3f, rayDirection: vec3f, diskCenter: vec3f, innerRadius: f32, outerRadius: f32) -> f32 {
-    if (abs(rayDirection.z) < 0.0001) {
-        return -1.0;
-    }
-    let t = (diskCenter.y - rayOrigin.y) / rayDirection.y;
-    if (t < 0.0) {
-        return -1.0;
-    }
-    let hitPosition = rayOrigin + t * rayDirection;
-    let radialDistance = length(hitPosition.xz - diskCenter.xz);
-    if (radialDistance >= innerRadius && radialDistance <= outerRadius) {
-        return t;
-    }
-    return -1.0;
 }
 
 fn Hash21(p: vec2f) -> f32 {
@@ -114,59 +239,41 @@ fn noise2D(p: vec2f) -> f32 {
 
 @fragment
 fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
-
-    // Generate camera ray.
     var screen = vec2f(
-    input.uv.x * 2.0 - 1.0,
-    1.0 - input.uv.y * 2.0
-);
+        input.uv.x * 2.0 - 1.0,
+        1.0 - input.uv.y * 2.0
+    );
 
     screen.x *= camera.resolutionFov.x / camera.resolutionFov.y;
 
     let rayOrigin = camera.cameraPosition.xyz;
     let rayDirection = getCameraRay(screen);
-
-
-    // Black hole properties.
+    let schwarzschildRadius = 0.65;
     let blackHoleCenter = vec3f(0.0, 0.0, -5.0);
-    let eventHorizonRadius = 0.65;
 
-    // Accretion disk properties.
     let diskInnerRadius = 0.85;
     let diskOuterRadius = 2.2;
 
-    // Test intersections.
-    let tHorizon = intersectSphere(
+    // Trace the ray through the curved spacetime of the black hole
+    let trace = traceBlackHole(
         rayOrigin,
         rayDirection,
         blackHoleCenter,
-        eventHorizonRadius
-    );
-
-    let tDisk = intersectDisk(
-        rayOrigin,
-        rayDirection,
-        blackHoleCenter,
+        schwarzschildRadius,
         diskInnerRadius,
         diskOuterRadius
     );
 
-    // Is the event horizon the closest hit?
-    
-if (
-    tHorizon > 0.0 &&
-    (tDisk < 0.0 || tHorizon < tDisk)
-) {
-    return vec4f(0.0, 0.0, 0.0, 1.0);
-}
+    // Event horizon hit (pitch black)
+    if (trace.hit) {
+        return vec4f(0.0, 0.0, 0.0, 1.0);
+    }   
 
-    // Is the accretion disk the closest hit?
-    if (tDisk > 0.0) {
-
-        let hitPosition = rayOrigin + tDisk * rayDirection;
-
+    // Accretion disk hit along the lensed path
+    if (trace.hitDisk) {
+        let hitPosition = trace.hitPosition;
         let radialDistance = length(
-            hitPosition.xy - blackHoleCenter.xy
+            hitPosition.xz - blackHoleCenter.xz
         );
 
         let radialFactor = clamp(
@@ -187,7 +294,6 @@ if (
         let innerColor = vec3f(1.0, 0.72, 0.32);
 
         let baseColor = mix(outerColor, middleColor, hotness);
-        // Hot inner region, cooler outer region.
         var diskColor = mix(
             baseColor,
             innerColor,
@@ -197,6 +303,6 @@ if (
         return vec4f(diskColor, 1.0);
     }
 
-    // Nothing was hit: show the background.
+    // Nothing was hit: show background
     return vec4f(0.0, 0.0, 0.0, 1.0);
 }
