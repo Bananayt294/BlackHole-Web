@@ -14,7 +14,7 @@ const Initialize = async () => {
   })
 
   const CameraBuffer: GPUBuffer = device.createBuffer({
-    size: 16,
+    size: 48,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
   });
 
@@ -70,7 +70,7 @@ const cameraBindGroup: GPUBindGroup = device.createBindGroup({
   canvas.height = height;
   const fov = 60.0 * Math.PI/180.0;
   const tanHalfFov = Math.tan(fov / 2.0);
-  device.queue.writeBuffer(CameraBuffer, 0, new Float32Array([width, height, tanHalfFov, 0.0 ]));
+  device.queue.writeBuffer(CameraBuffer, 0, new Float32Array([width, height, tanHalfFov, 0.0,  0.0, 1.5, 0.0, 0.0,  0.0, -0.15, 0.0, 0.0 ]));
   const commandEncoder: GPUCommandEncoder = device.createCommandEncoder();
   const textureView: GPUTextureView = context.getCurrentTexture().createView();
   const renderPass: GPURenderPassEncoder = commandEncoder.beginRenderPass({
