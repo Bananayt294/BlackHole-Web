@@ -20,6 +20,8 @@ struct TraceResult {
     hit: bool,
     hitDisk: bool,
     hitPosition: vec3f, 
+    impactParameter: f32,
+    pathAngle: f32,
 };
 
 @group(0) @binding(0)
@@ -121,16 +123,26 @@ fn traceBlackHole(
     diskInnerRadius: f32,
     diskOuterRadius: f32
 ) -> TraceResult {
+
     let relativePosition = rayOrigin - blackHoleCenter;
+    let initialRadius = length(relativePosition);
+
+    // Check whether the camera starts inside the horizon.
+    if (initialRadius <= schwarzschildRadius) {
+        return TraceResult(true, false, blackHoleCenter, 0.0, 0.0);
+    }
+
     let radialBasis = normalize(relativePosition);
     let radialComponent = dot(rayDirection, radialBasis);
     let tangentDirection = rayDirection - radialComponent * radialBasis;
 
+    // Handle purely radial rays.
     if (length(tangentDirection) < 0.0001) {
         if (radialComponent < 0.0) {
-            return TraceResult(true, false, blackHoleCenter);
+            return TraceResult(true, false, blackHoleCenter, 0.0, 0.0);
         }
-        return TraceResult(false, false, rayOrigin);
+
+        return TraceResult(false, false, rayOrigin, 0.0, 0.0);
     }
 
     let orbit = initializeOrbit(
@@ -140,6 +152,8 @@ fn traceBlackHole(
         schwarzschildRadius
     );
 
+    let impactParameter = orbit.impactParameter;
+
     var state = orbit.state;
     var phi = 0.0;
 
@@ -147,44 +161,63 @@ fn traceBlackHole(
     let maxSteps = 1000;
 
     var radius = 1.0 / state.u;
-    var radialDirection = orbit.radialBasis * cos(phi) + orbit.tangentBasis * sin(phi);
+
+    var radialDirection =
+        orbit.radialBasis * cos(phi) +
+        orbit.tangentBasis * sin(phi);
+
     var prevPosition = blackHoleCenter + radialDirection * radius;
 
     for (var i = 0; i < maxSteps; i++) {
+
         if (state.u <= 0.0) {
-            return TraceResult(false, false, vec3f(0.0));
+            return TraceResult(
+                false, false, vec3f(0.0),
+                impactParameter, phi
+            );
         }
 
         radius = 1.0 / state.u;
 
+        // Event horizon.
         if (radius <= schwarzschildRadius) {
-            return TraceResult(true, false, blackHoleCenter);
+            return TraceResult(
+                true, false, blackHoleCenter,
+                impactParameter, phi
+            );
         }
 
-        radialDirection =
-            orbit.radialBasis * cos(phi) +
-            orbit.tangentBasis * sin(phi);
+        radialDirection = orbit.radialBasis * cos(phi) + orbit.tangentBasis * sin(phi);
 
-        let currentPosition =
-            blackHoleCenter + radialDirection * radius;
+        let currentPosition = blackHoleCenter + radialDirection * radius;
 
-        // Check for accretion disk intersection along the curved ray path (y = blackHoleCenter.y)
+        // Check for accretion disk intersection.
         let diskY = blackHoleCenter.y;
-        if (i > 0 && (prevPosition.y - diskY) * (currentPosition.y - diskY) <= 0.0) {
-            let denom = currentPosition.y - prevPosition.y;
-            var t = 0.5;
-            if (abs(denom) > 0.00001) {
-                t = (diskY - prevPosition.y) / denom;
-            }
-            let hitPos = mix(prevPosition, currentPosition, t);
+
+        let previousSide = prevPosition.y - diskY;
+        let currentSide = currentPosition.y - diskY;
+
+        let crossedDiskPlane =
+            (previousSide < 0.0 && currentSide >= 0.0) ||
+            (previousSide > 0.0 && currentSide <= 0.0);
+
+        if (i > 0 && crossedDiskPlane) {
+
+            let t = previousSide / (previousSide - currentSide);
+
+            let hitPos = mix(prevPosition,currentPosition,t);
+            let hitPathAngle = (phi - stepSize) + t * stepSize;
+
             let radialDistance = length(hitPos.xz - blackHoleCenter.xz);
+
             if (radialDistance >= diskInnerRadius && radialDistance <= diskOuterRadius) {
-                return TraceResult(false, true, hitPos);
+                return TraceResult(false, true, hitPos,impactParameter, hitPathAngle);
             }
         }
-
+        
         prevPosition = currentPosition;
 
+        // Advance the ray using RK4.
         state = orbitRK4Step(
             state,
             stepSize,
@@ -193,16 +226,18 @@ fn traceBlackHole(
 
         phi += stepSize;
 
+        // Check whether the ray escaped.
         if (state.u > 0.0) {
+
             let nextRadius = 1.0 / state.u;
 
             if (nextRadius > 100.0 && state.duPhi < 0.0) {
-                return TraceResult(false, false, currentPosition);
+                return TraceResult(false, false, currentPosition,impactParameter, phi);
             }
         }
     }
 
-    return TraceResult(false, false, blackHoleCenter);
+    return TraceResult(false,true,blackHoleCenter,impactParameter,phi);
 }
 
 @vertex
@@ -249,6 +284,7 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
     let rayOrigin = camera.cameraPosition.xyz;
     let rayDirection = getCameraRay(screen);
     let schwarzschildRadius = 0.65;
+    let criticalImpactParameter = 2.5980762 * schwarzschildRadius;
     let blackHoleCenter = vec3f(0.0, 0.0, -5.0);
 
     let diskInnerRadius = 0.85;
@@ -270,39 +306,97 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
     }   
 
     // Accretion disk hit along the lensed path
+    // 
+    
     if (trace.hitDisk) {
+
         let hitPosition = trace.hitPosition;
+
         let radialDistance = length(
             hitPosition.xz - blackHoleCenter.xz
         );
 
         let radialFactor = clamp(
-            (radialDistance - diskInnerRadius) /
-            (diskOuterRadius - diskInnerRadius),
+            (radialDistance - diskInnerRadius)/(diskOuterRadius - diskInnerRadius),
             0.0,
             1.0
         );
-        let angle = atan2(hitPosition.z - blackHoleCenter.z, hitPosition.x - blackHoleCenter.x);
-        let broadNoise = noise2D(vec2f(angle * 6.0, radialDistance * 12.0));
-        let fineNoise = noise2D(vec2f(angle * 18.0, radialDistance * 35.0));
+
+        // Accretion disk turbulence.
+        let angle = atan2(
+            hitPosition.z - blackHoleCenter.z,
+            hitPosition.x - blackHoleCenter.x
+        );
+
+        let broadNoise = noise2D(
+            vec2f(angle * 6.0, radialDistance * 12.0)
+        );
+
+        let fineNoise = noise2D(
+            vec2f(angle * 18.0, radialDistance * 35.0)
+        );
+
         let turbulence = mix(broadNoise, fineNoise, 0.5);
         let filament = smoothstep(0.4, 0.8, turbulence);
         let hotness = pow(1.0 - radialFactor, 1.4);
 
+        // Base disk colors.
         let outerColor = vec3f(0.18, 0.008, 0.002);
         let middleColor = vec3f(1.0, 0.16, 0.015);
         let innerColor = vec3f(1.0, 0.72, 0.32);
 
-        let baseColor = mix(outerColor, middleColor, hotness);
+        let baseColor = mix(
+            outerColor,
+            middleColor,
+            hotness
+        );
+
         var diskColor = mix(
             baseColor,
             innerColor,
             pow(hotness, 4.0) * 0.8
         );
+
         diskColor *= 0.45 + filament * 1.2;
+
+
+        let criticalImpactParameter =
+            2.5980762 * schwarzschildRadius;
+
+        let impactDifference = abs(
+            trace.impactParameter - criticalImpactParameter
+        );
+        
+        let relativeImpactDifference = impactDifference / impactDifference;
+
+        let nearCritical = 1.0 - smoothstep(
+            0.02,
+            0.35,
+            impactDifference
+        );
+
+        let stronglyLensed = smoothstep(
+            3.14159,
+            6.28318,
+            trace.pathAngle
+        );
+
+        let photonRing = nearCritical * stronglyLensed;
+
+        let ringColor = vec3f(
+            1.0,
+            0.82,
+            0.58
+        );
+
+        diskColor = mix(
+            diskColor,
+            ringColor,
+            photonRing * 0.85
+        );
+
         return vec4f(diskColor, 1.0);
     }
-
     // Nothing was hit: show background
     return vec4f(0.0, 0.0, 0.0, 1.0);
 }

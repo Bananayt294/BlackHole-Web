@@ -1,92 +1,237 @@
 import shader from "./shaders.wgsl?raw";
+import compositeShader from "./composite.wgsl?raw";
+
 
 const Initialize = async () => {
 
-  const canvas : HTMLCanvasElement | null = document.getElementById("gfx-main") as HTMLCanvasElement;
-  const adapter : GPUAdapter = <GPUAdapter>await navigator.gpu?.requestAdapter();
-  const device : GPUDevice = <GPUDevice>await adapter?.requestDevice();
-  const context : GPUCanvasContext = <GPUCanvasContext>canvas?.getContext("webgpu");
-  const format : GPUTextureFormat = "bgra8unorm";
-  context.configure({
-    device: device,
-    format: format,
-    alphaMode: "opaque"
-  })
+    const canvas = document.getElementById("gfx-main") as HTMLCanvasElement;
 
-  const CameraBuffer: GPUBuffer = device.createBuffer({
-    size: 48,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-  });
+    if (!navigator.gpu) {
+        throw new Error("WebGPU is not supported.");
+    }
 
-  
-const shaderModule = device.createShaderModule({
-    code: shader
-});
+    const adapter = await navigator.gpu.requestAdapter();
 
-// Check whether the WGSL shader compiled successfully.
-const compilationInfo = await shaderModule.getCompilationInfo();
+    if (!adapter) {
+        throw new Error("No GPU adapter found.");
+    }
 
-for (const message of compilationInfo.messages) {
-    console.log(
-        `WGSL ${message.type} at ${message.lineNum}:${message.linePos}`,
-        message.message
+    const device = await adapter.requestDevice();
+
+    const context = canvas.getContext("webgpu");
+
+    if (!context) {
+        throw new Error("Failed to get WebGPU context.");
+    }
+
+    const width = Math.max(
+        1,
+        Math.floor(canvas.clientWidth * window.devicePixelRatio)
     );
-}
 
-if (compilationInfo.messages.some(message => message.type === "error")) {
-    throw new Error("WGSL shader compilation failed. Check the console.");
-}
+    const height = Math.max(
+        1,
+        Math.floor(canvas.clientHeight * window.devicePixelRatio)
+    );
 
-const pipeline: GPURenderPipeline = device.createRenderPipeline({
-    vertex: {
-        module: shaderModule,
-        entryPoint: "vertexMain"
-    },
+    canvas.width = width;
+    canvas.height = height;
 
-    fragment: {
-        module: shaderModule,
-        entryPoint: "fragmentMain",
-        targets: [{ format: format }]
-    },
+    const format = navigator.gpu.getPreferredCanvasFormat();
 
-    primitive: {
-        topology: "triangle-list"
-    },
+    context.configure({
+        device,
+        format,
+        alphaMode: "opaque"
+    });
 
-    layout: "auto"
-});
-const cameraBindGroup: GPUBindGroup = device.createBindGroup({
-    layout: pipeline.getBindGroupLayout(0),
-    entries: [{
-      binding: 0,
-      resource: {
-        buffer: CameraBuffer
-      }
-    }]
-  });
-  const width = Math.max(1,  Math.floor(canvas.clientWidth * window.devicePixelRatio));
-  const height = Math.max(1, Math.floor(canvas.clientHeight * window.devicePixelRatio));
-  canvas.width = width;
-  canvas.height = height;
-  const fov = 60.0 * Math.PI/180.0;
-  const tanHalfFov = Math.tan(fov / 2.0);
-  device.queue.writeBuffer(CameraBuffer, 0, new Float32Array([width, height, tanHalfFov, 0.0,  0.0, 1.5, 0.0, 0.0,  0.0, -0.15, 0.0, 0.0 ]));
-  const commandEncoder: GPUCommandEncoder = device.createCommandEncoder();
-  const textureView: GPUTextureView = context.getCurrentTexture().createView();
-  const renderPass: GPURenderPassEncoder = commandEncoder.beginRenderPass({
-    colorAttachments: [{
-      view: textureView,
-      clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
-      loadOp: "clear",
-      storeOp: "store",
-    }]
-  });
-  renderPass.setPipeline(pipeline);
-  renderPass.setBindGroup(0, cameraBindGroup);
-  renderPass.draw(3, 1, 0, 0);
-  renderPass.end();
+    const CameraBuffer = device.createBuffer({
+        size: 48,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
 
-  device.queue.submit([commandEncoder.finish()]);
-}
+    const fov = 60.0 * Math.PI / 180.0;
+    const tanHalfFov = Math.tan(fov / 2.0);
+
+    device.queue.writeBuffer(
+        CameraBuffer,
+        0,
+        new Float32Array([
+            width, height, tanHalfFov, 0.0,
+            0.0, 1.5, 0.0, 0.0,
+            0.0, -0.15, 0.0, 0.0
+        ])
+    );
+
+    const shaderModule = device.createShaderModule({
+        code: shader
+    });
+
+    const compilationInfo = await shaderModule.getCompilationInfo();
+
+    for (const message of compilationInfo.messages) {
+        console.log(
+            `Scene WGSL ${message.type} at ${message.lineNum}:${message.linePos}`,
+            message.message
+        );
+    }
+
+    if (compilationInfo.messages.some(m => m.type === "error")) {
+        throw new Error("Scene shader compilation failed.");
+    }
+
+    const pipeline = device.createRenderPipeline({
+
+        vertex: {
+            module: shaderModule,
+            entryPoint: "vertexMain"
+        },
+
+        fragment: {
+            module: shaderModule,
+            entryPoint: "fragmentMain",
+            targets: [
+                { format: "rgba16float" }
+            ]
+        },
+
+        primitive: {
+            topology: "triangle-list"
+        },
+
+        layout: "auto"
+    });
+
+    const cameraBindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+            {
+                binding: 0,
+                resource: {
+                    buffer: CameraBuffer
+                }
+            }
+        ]
+    });
+    const sceneTexture = device.createTexture({
+        size: {
+            width,
+            height
+        },
+
+        format: "rgba16float",
+
+        usage:
+            GPUTextureUsage.RENDER_ATTACHMENT |
+            GPUTextureUsage.TEXTURE_BINDING
+    });
+
+    const sceneView = sceneTexture.createView();
+
+    const compositeModule = device.createShaderModule({
+        code: compositeShader
+    });
+
+    const compositeInfo = await compositeModule.getCompilationInfo();
+
+    for (const message of compositeInfo.messages) {
+        console.log(
+            `Composite WGSL ${message.type} at ${message.lineNum}:${message.linePos}`,
+            message.message
+        );
+    }
+
+    if (compositeInfo.messages.some(m => m.type === "error")) {
+        throw new Error("Composite shader compilation failed.");
+    }
+
+    const compositePipeline = device.createRenderPipeline({
+
+        vertex: {
+            module: compositeModule,
+            entryPoint: "vertexMain"
+        },
+
+        fragment: {
+            module: compositeModule,
+            entryPoint: "fragmentMain",
+            targets: [
+                { format }
+            ]
+        },
+
+        primitive: {
+            topology: "triangle-list"
+        },
+
+        layout: "auto"
+    });
+
+    const compositeBindGroup = device.createBindGroup({
+        layout: compositePipeline.getBindGroupLayout(0),
+        entries: [
+            {
+                binding: 0,
+                resource: sceneView
+            }
+        ]
+    });
+
+    const commandEncoder = device.createCommandEncoder();
+
+    // PASS 1: Render black hole into HDR texture.
+    const scenePass = commandEncoder.beginRenderPass({
+
+        colorAttachments: [
+            {
+                view: sceneView,
+
+                clearValue: {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0
+                },
+
+                loadOp: "clear",
+                storeOp: "store"
+            }
+        ]
+    });
+
+    scenePass.setPipeline(pipeline);
+    scenePass.setBindGroup(0, cameraBindGroup);
+    scenePass.draw(3, 1, 0, 0);
+    scenePass.end();
+
+    
+    const canvasView = context.getCurrentTexture().createView();
+
+    const displayPass = commandEncoder.beginRenderPass({
+
+        colorAttachments: [
+            {
+                view: canvasView,
+
+                clearValue: {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0
+                },
+
+                loadOp: "clear",
+                storeOp: "store"
+            }
+        ]
+    });
+
+    displayPass.setPipeline(compositePipeline);
+    displayPass.setBindGroup(0, compositeBindGroup);
+    displayPass.draw(3, 1, 0, 0);
+    displayPass.end();
+
+    device.queue.submit([commandEncoder.finish()]);
+};
 
 Initialize();
