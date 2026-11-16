@@ -1,8 +1,13 @@
+
 # WebGPU Black Hole Simulation
 
 A real-time black hole visualization built with **WebGPU, TypeScript, and WGSL**. The project renders a non-rotating Schwarzschild black hole, traces light rays through curved spacetime, shades a procedural accretion disk, and applies an HDR post-processing pipeline with bloom.
 
 The renderer is designed as a learning project: the implementation exposes the camera, ray integration, disk intersection, and post-processing stages rather than hiding them behind a rendering engine.
+
+## Live Demo
+
+Try the hosted simulation here: **[WebGPU Black Hole Simulation](https://blackholeweb.vercel.app/)**.
 
 > **Project status:** Active development. Several visual effects are approximations intended for real-time visualization, not a complete general-relativistic radiative-transfer simulation. See [Current limitations](#current-limitations).
 
@@ -196,7 +201,7 @@ Bloom is implemented as a multi-pass HDR effect:
 - Bright-pass extraction isolates luminous pixels.
 - A horizontal blur pass spreads highlights sideways.
 - A vertical blur pass spreads the result vertically.
-- The composite pass adds the blurred highlights to the original scene.
+- The composite pass adds the blurred highlights to the original HDR scene.
 - An ACES-style curve compresses HDR values for display, followed by a gamma conversion.
 
 The current implementation blurs at the full scene resolution. A half- or quarter-resolution bloom chain is a planned optimization, especially for lower-powered GPUs.
@@ -252,4 +257,4 @@ The scene ray tracer is the most expensive stage. Try reducing the canvas's effe
 
 ## License
 
-No license is specified in this README. Add a `LICENSE` file before distributing the project if you want to grant others explicit reuse rights.
+MIT
