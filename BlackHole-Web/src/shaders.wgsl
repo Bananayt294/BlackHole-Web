@@ -676,10 +676,7 @@ fn fragmentMain(
         diskOuterRadius
     );
 
-    // -----------------------------------------
-    // EVENT HORIZON
-    // -----------------------------------------
-
+ 
     if (trace.hit) {
         return vec4f(
             0.0,
@@ -689,9 +686,6 @@ fn fragmentMain(
         );
     }
 
-    // =================================================
-    // ACCRETION DISK
-    // =================================================
 
     if (trace.hitDisk) {
 
@@ -708,18 +702,13 @@ fn fragmentMain(
             1.0
         );
 
-        // -----------------------------------------
-        // DISK ANGLE
-        // -----------------------------------------
+   
 
         let angle = atan2(
             hitPosition.z - blackHoleCenter.z,
             hitPosition.x - blackHoleCenter.x
         );
 
-        // -----------------------------------------
-        // DIFFERENTIAL ROTATION
-        // -----------------------------------------
 
         let time = camera.cameraRotation.z;
 
@@ -737,9 +726,7 @@ fn fragmentMain(
         let animatedAngle =
             angle - time * angularVelocity;
 
-        // -----------------------------------------
-        // BROAD TURBULENCE
-        // -----------------------------------------
+
 
         let broadNoise = noise2D(
             vec2f(
@@ -748,9 +735,6 @@ fn fragmentMain(
             )
         );
 
-        // -----------------------------------------
-        // FINE TURBULENCE
-        // -----------------------------------------
 
         let fineNoise = noise2D(
             vec2f(
@@ -775,10 +759,6 @@ fn fragmentMain(
             1.0 - radialFactor,
             1.4
         );
-
-        // -----------------------------------------
-        // DISK TEMPERATURE COLORS
-        // -----------------------------------------
 
         let outerColor = vec3f(
             0.18,
@@ -811,10 +791,6 @@ fn fragmentMain(
         );
 
         diskColor *= 0.45 + filament * 1.2;
-
-        // -----------------------------------------
-        // PHOTON RING CONTRIBUTION
-        // -----------------------------------------
 
         let impactDifference = abs(
             trace.impactParameter -
@@ -858,9 +834,6 @@ fn fragmentMain(
         );
     }
 
-    // =================================================
-    // GRAVITATIONALLY LENSED STARFIELD
-    // =================================================
 
     if (length(trace.escapeDirection) > 0.5) {
 
@@ -874,10 +847,6 @@ fn fragmentMain(
             1.0
         );
     }
-
-    // -----------------------------------------
-    // CAPTURED OR UNRESOLVED RAYS
-    // -----------------------------------------
 
     return vec4f(
         0.0,
