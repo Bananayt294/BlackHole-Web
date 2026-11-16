@@ -23,6 +23,7 @@ struct TraceResult {
     hitPosition: vec3f,
     impactParameter: f32,
     pathAngle: f32,
+    escapeDirection: vec3f,
 };
 
 @group(0) @binding(0)
@@ -33,6 +34,9 @@ struct VertexOutput {
     @location(0) uv: vec2f,
 };
 
+// =================================================
+// SCHWARZSCHILD ORBIT EQUATIONS
+// =================================================
 
 fn orbitDerivative(
     state: OrbitState,
@@ -47,6 +51,10 @@ fn orbitDerivative(
 
     return OrbitState(du, d2u);
 }
+
+// =================================================
+// INITIALIZE RAY ORBIT
+// =================================================
 
 fn initializeOrbit(
     rayOrigin: vec3f,
@@ -92,7 +100,10 @@ fn initializeOrbit(
         -sqrtMetric * radialComponent /
         (initialRadius * sinAlpha);
 
-    let state = OrbitState(initialU, initialDuPhi);
+    let state = OrbitState(
+        initialU,
+        initialDuPhi
+    );
 
     return RayOrbit(
         state,
@@ -101,6 +112,7 @@ fn initializeOrbit(
         impactParameter
     );
 }
+
 
 
 fn addOrbitStates(
@@ -124,6 +136,7 @@ fn scaleOrbitState(
         state.duPhi * scale
     );
 }
+
 
 fn orbitRK4Step(
     state: OrbitState,
@@ -186,6 +199,7 @@ fn orbitRK4Step(
     );
 }
 
+
 fn getCameraRay(screen: vec2f) -> vec3f {
 
     let yaw = camera.cameraRotation.x;
@@ -197,7 +211,11 @@ fn getCameraRay(screen: vec2f) -> vec3f {
         -cos(pitch) * cos(yaw)
     ));
 
-    let worldUp = vec3f(0.0, 1.0, 0.0);
+    let worldUp = vec3f(
+        0.0,
+        1.0,
+        0.0
+    );
 
     let right = normalize(
         cross(forward, worldUp)
@@ -215,6 +233,8 @@ fn getCameraRay(screen: vec2f) -> vec3f {
         up * screen.y * tanHalfFov
     );
 }
+
+
 
 fn traceBlackHole(
     rayOrigin: vec3f,
@@ -235,7 +255,8 @@ fn traceBlackHole(
             false,
             blackHoleCenter,
             0.0,
-            0.0
+            0.0,
+            vec3f(0.0)
         );
     }
 
@@ -258,7 +279,8 @@ fn traceBlackHole(
                 false,
                 blackHoleCenter,
                 0.0,
-                0.0
+                0.0,
+                vec3f(0.0)
             );
         }
 
@@ -267,7 +289,8 @@ fn traceBlackHole(
             false,
             rayOrigin,
             0.0,
-            0.0
+            0.0,
+            rayDirection
         );
     }
 
@@ -303,7 +326,8 @@ fn traceBlackHole(
                 false,
                 vec3f(0.0),
                 impactParameter,
-                phi
+                phi,
+                vec3f(0.0)
             );
         }
 
@@ -316,7 +340,8 @@ fn traceBlackHole(
                 false,
                 blackHoleCenter,
                 impactParameter,
-                phi
+                phi,
+                vec3f(0.0)
             );
         }
 
@@ -327,14 +352,11 @@ fn traceBlackHole(
         let currentPosition =
             blackHoleCenter + radialDirection * radius;
 
-
-        let diskY = blackHoleCenter.y;
-
         let previousSide =
-            prevPosition.y - diskY;
+            prevPosition.y - blackHoleCenter.y;
 
         let currentSide =
-            currentPosition.y - diskY;
+            currentPosition.y - blackHoleCenter.y;
 
         let crossedDiskPlane =
             (previousSide < 0.0 && currentSide >= 0.0) ||
@@ -342,8 +364,8 @@ fn traceBlackHole(
 
         if (i > 0 && crossedDiskPlane) {
 
-            let t = previousSide /
-                (previousSide - currentSide);
+            let t =
+                previousSide / (previousSide - currentSide);
 
             let hitPos = mix(
                 prevPosition,
@@ -351,31 +373,31 @@ fn traceBlackHole(
                 t
             );
 
-            // Estimate angular position at intersection.
             let hitPathAngle =
                 (phi - stepSize) + t * stepSize;
 
-            let radialDistance = length(
+            let diskRadius = length(
                 hitPos.xz - blackHoleCenter.xz
             );
 
             if (
-                radialDistance >= diskInnerRadius &&
-                radialDistance <= diskOuterRadius
+                diskRadius >= diskInnerRadius &&
+                diskRadius <= diskOuterRadius
             ) {
+
                 return TraceResult(
                     false,
                     true,
                     hitPos,
                     impactParameter,
-                    hitPathAngle
+                    hitPathAngle,
+                    vec3f(0.0)
                 );
             }
         }
 
         prevPosition = currentPosition;
 
-        // Advance ray using RK4.
         state = orbitRK4Step(
             state,
             stepSize,
@@ -384,7 +406,7 @@ fn traceBlackHole(
 
         phi += stepSize;
 
-        // Escaping ray.
+
         if (state.u > 0.0) {
 
             let nextRadius = 1.0 / state.u;
@@ -393,12 +415,37 @@ fn traceBlackHole(
                 nextRadius > 100.0 &&
                 state.duPhi < 0.0
             ) {
+
+                let escapeRadial = normalize(
+                    orbit.radialBasis * cos(phi) +
+                    orbit.tangentBasis * sin(phi)
+                );
+
+                let escapeTangent =
+                    -orbit.radialBasis * sin(phi) +
+                    orbit.tangentBasis * cos(phi);
+
+                // dr/dphi = -u'/u^2
+                let radialDerivative =
+                    -state.duPhi / (state.u * state.u);
+
+                // Approximate outgoing direction at large radius.
+                let outgoingDirection = normalize(
+                    radialDerivative * escapeRadial +
+                    nextRadius * escapeTangent
+                );
+
+                let escapePosition =
+                    blackHoleCenter +
+                    escapeRadial * nextRadius;
+
                 return TraceResult(
                     false,
                     false,
-                    currentPosition,
+                    escapePosition,
                     impactParameter,
-                    phi
+                    phi,
+                    outgoingDirection
                 );
             }
         }
@@ -410,9 +457,12 @@ fn traceBlackHole(
         false,
         blackHoleCenter,
         impactParameter,
-        phi
+        phi,
+        vec3f(0.0)
     );
 }
+
+
 
 @vertex
 fn vertexMain(
@@ -441,6 +491,7 @@ fn vertexMain(
     return output;
 }
 
+
 fn Hash21(p: vec2f) -> f32 {
 
     return fract(
@@ -466,12 +517,125 @@ fn noise2D(p: vec2f) -> f32 {
         (d - b) * u.x * u.y;
 }
 
+
+
+fn starfield(
+    direction: vec3f,
+    time: f32
+) -> vec3f {
+
+    let d = normalize(direction);
+
+    // Convert direction to spherical coordinates.
+    let longitude = atan2(d.z, d.x);
+
+    let latitude = asin(
+        clamp(d.y, -1.0, 1.0)
+    );
+
+    let uv = vec2f(
+        longitude / 6.2831853 + 0.5,
+        latitude / 3.14159265 + 0.5
+    );
+
+    // Divide the sky into cells.
+    let grid = uv * vec2f(640.0, 320.0);
+
+    let cell = floor(grid);
+    let local = fract(grid);
+
+    // Decide whether this cell contains a star.
+    let starSeed = Hash21(
+        cell + vec2f(17.3, 91.7)
+    );
+
+    let presence = step(0.992, starSeed);
+
+    // Random star position.
+    let starPosition = vec2f(
+        Hash21(cell + vec2f(3.1, 7.7)),
+        Hash21(cell + vec2f(11.7, 19.3))
+    );
+
+    let distanceToStar = length(
+        local - starPosition
+    );
+
+    // Random star size.
+    let sizeSeed = Hash21(
+        cell + vec2f(31.4, 8.2)
+    );
+
+    let starRadius = mix(
+        0.08,
+        0.22,
+        sizeSeed
+    );
+
+    let starShape = 1.0 - smoothstep(
+        starRadius * 0.15,
+        starRadius,
+        distanceToStar
+    );
+
+    // Random brightness.
+    let brightnessSeed = Hash21(
+        cell + vec2f(27.8, 53.2)
+    );
+
+    let brightness = mix(
+        0.25,
+        2.0,
+        pow(brightnessSeed, 5.0)
+    );
+
+    // Subtle twinkling.
+    let phase =
+        Hash21(cell + vec2f(71.4, 9.2)) *
+        6.2831853;
+
+    let frequency = mix(
+        0.5,
+        1.8,
+        Hash21(cell + vec2f(41.2, 13.5))
+    );
+
+    let twinkle =
+        0.88 +
+        0.12 * sin(time * frequency + phase);
+
+    // Slight star color variation.
+    let colorSeed = Hash21(
+        cell + vec2f(21.7, 3.4)
+    );
+
+    let starColor = mix(
+        vec3f(0.62, 0.75, 1.0),
+        vec3f(1.0, 0.85, 0.68),
+        colorSeed
+    );
+
+    let stars =
+        presence *
+        starShape *
+        brightness *
+        twinkle;
+
+    let background = vec3f(
+        0.0008,
+        0.0012,
+        0.003
+    );
+
+    return background + starColor * stars;
+}
+
 @fragment
 fn fragmentMain(
     input: VertexOutput
 ) -> @location(0) vec4f {
 
-    // Screen coordinates.
+
     var screen = vec2f(
         input.uv.x * 2.0 - 1.0,
         1.0 - input.uv.y * 2.0
@@ -481,11 +645,13 @@ fn fragmentMain(
         camera.resolutionFov.x /
         camera.resolutionFov.y;
 
-    // Camera ray.
+
     let rayOrigin = camera.cameraPosition.xyz;
+
     let rayDirection = getCameraRay(screen);
 
-    // Black hole parameters.
+    
+
     let schwarzschildRadius = 0.65;
 
     let criticalImpactParameter =
@@ -497,7 +663,7 @@ fn fragmentMain(
         -5.0
     );
 
-    // Accretion disk parameters.
+
     let diskInnerRadius = 0.85;
     let diskOuterRadius = 2.2;
 
@@ -510,10 +676,22 @@ fn fragmentMain(
         diskOuterRadius
     );
 
-    // Event horizon.
+    // -----------------------------------------
+    // EVENT HORIZON
+    // -----------------------------------------
+
     if (trace.hit) {
-        return vec4f(0.0, 0.0, 0.0, 1.0);
+        return vec4f(
+            0.0,
+            0.0,
+            0.0,
+            1.0
+        );
     }
+
+    // =================================================
+    // ACCRETION DISK
+    // =================================================
 
     if (trace.hitDisk) {
 
@@ -530,11 +708,18 @@ fn fragmentMain(
             1.0
         );
 
+        // -----------------------------------------
+        // DISK ANGLE
+        // -----------------------------------------
 
         let angle = atan2(
             hitPosition.z - blackHoleCenter.z,
             hitPosition.x - blackHoleCenter.x
         );
+
+        // -----------------------------------------
+        // DIFFERENTIAL ROTATION
+        // -----------------------------------------
 
         let time = camera.cameraRotation.z;
 
@@ -548,10 +733,13 @@ fn fragmentMain(
             sqrt(0.5 * schwarzschildRadius) /
             pow(safeRadius, 1.5);
 
-        // Animate the plasma structures.
+        // Animate plasma structures.
         let animatedAngle =
             angle - time * angularVelocity;
 
+        // -----------------------------------------
+        // BROAD TURBULENCE
+        // -----------------------------------------
 
         let broadNoise = noise2D(
             vec2f(
@@ -559,6 +747,10 @@ fn fragmentMain(
                 radialDistance * 12.0
             )
         );
+
+        // -----------------------------------------
+        // FINE TURBULENCE
+        // -----------------------------------------
 
         let fineNoise = noise2D(
             vec2f(
@@ -583,6 +775,10 @@ fn fragmentMain(
             1.0 - radialFactor,
             1.4
         );
+
+        // -----------------------------------------
+        // DISK TEMPERATURE COLORS
+        // -----------------------------------------
 
         let outerColor = vec3f(
             0.18,
@@ -615,6 +811,10 @@ fn fragmentMain(
         );
 
         diskColor *= 0.45 + filament * 1.2;
+
+        // -----------------------------------------
+        // PHOTON RING CONTRIBUTION
+        // -----------------------------------------
 
         let impactDifference = abs(
             trace.impactParameter -
@@ -652,8 +852,32 @@ fn fragmentMain(
             photonRing * 0.85
         );
 
-        return vec4f(diskColor, 1.0);
+        return vec4f(
+            diskColor,
+            1.0
+        );
     }
+
+    // =================================================
+    // GRAVITATIONALLY LENSED STARFIELD
+    // =================================================
+
+    if (length(trace.escapeDirection) > 0.5) {
+
+        let background = starfield(
+            trace.escapeDirection,
+            camera.cameraRotation.z
+        );
+
+        return vec4f(
+            background,
+            1.0
+        );
+    }
+
+    // -----------------------------------------
+    // CAPTURED OR UNRESOLVED RAYS
+    // -----------------------------------------
 
     return vec4f(
         0.0,
